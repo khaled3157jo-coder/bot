@@ -94,90 +94,91 @@ def help_command(update: Update, context: CallbackContext) -> None:
         logger.error(f"خطأ في المساعدة: {traceback.format_exc()}")
 
 def download_video(update: Update, context: CallbackContext) -> None:
-    """تحميل الفيديو مع حلول متعددة"""
+    """تحميل الفيديو مع معالجة أخطاء مفصلة"""
     url = update.message.text.strip()
     
-    progress_msg = update.message.reply_text("🔍 جاري معالجة الرابط...")
+    if not re.match(r'^https?://', url):
+        update.message.reply_text("⚠️ الرابط يجب أن يبدأ بـ http:// أو https://")
+        return
+    
+    progress_msg = update.message.reply_text("🔍 جاري التحقق من الرابط...")
     
     try:
-        # المحاولة الأولى: مع cookies
-        ydl_opts = {
-            'format': 'best[ext=mp4]',
-            'outtmpl': 'downloads/%(title)s.%(ext)s',
-            'socket_timeout': 60,
-            'retries': 2,
-        }
+        # التحقق من cookies
+        cookies_check = check_cookies()
+        if not cookies_check.startswith("✅"):
+            progress_msg.edit_text(f"{cookies_check}\n\nيحتاج البوت إلى ملف cookies.txt صالح")
+            return
         
-        # إضافة cookies إذا كان الملف موجوداً
-        if os.path.exists('cookies.txt'):
-            ydl_opts['cookiefile'] = 'cookies.txt'
-            progress_msg.edit_text("🔐 جاري التحميل بصلاحيات كاملة...")
-        else:
-            progress_msg.edit_text("⏬ جاري التحميل (وضع عادي)...")
+        # إعدادات yt-dlp مع تفاصيل تصحيح
+        ydl_opts = {
+            'format': 'best[ext=mp4]/best',
+            'outtmpl': os.path.join(DOWNLOAD_FOLDER, '%(title)s.%(ext)s'),
+            'cookiefile': 'cookies.txt',
+            'verbose': True,
+            'socket_timeout': 120,
+            'retries': 3,
+            'no_warnings': False,
+            'ignoreerrors': False,
+        }
+
+        progress_msg.edit_text("⏬ جاري استخراج معلومات الفيديو...")
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
+            # استخراج المعلومات أولاً
+            info = ydl.extract_info(url, download=False)
+            video_title = info.get('title', 'فيديو')
+            
+            progress_msg.edit_text(f"📥 جاري تحميل: {video_title}")
+            
+            # التحميل الفعلي
+            ydl.download([url])
             file_path = ydl.prepare_filename(info)
             
+            # التحقق من وجود الملف
+            if not os.path.exists(file_path):
+                progress_msg.edit_text("❌ تم التحميل ولكن الملف غير موجود")
+                logger.error(f"الملف غير موجود بعد التحميل: {file_path}")
+                return
+            
             # إرسال الفيديو
+            progress_msg.edit_text("📤 جاري إرسال الفيديو...")
+            
             with open(file_path, 'rb') as video_file:
                 context.bot.send_video(
                     chat_id=update.message.chat_id,
                     video=video_file,
-                    caption=f"🎬 {info.get('title', 'فيديو')}",
-                    timeout=120
+                    caption=f"🎬 {video_title}",
+                    timeout=300,
+                    write_timeout=300,
+                    connect_timeout=300
                 )
             
+            # التنظيف
             os.remove(file_path)
             progress_msg.delete()
+            logger.info(f"تم تحميل وإرسال الفيديو بنجاح: {video_title}")
             
     except yt_dlp.DownloadError as e:
-        if 'Sign in to confirm' in str(e):
-            # المحاولة الثانية: بدون cookies (للفيديوهات العامة)
-            try:
-                progress_msg.edit_text("🔄 جرب طريقة بديلة...")
-                
-                ydl_opts_no_cookies = {
-                    'format': 'worst[ext=mp4]',  # جودة أقل لتجنب الحماية
-                    'outtmpl': 'downloads/%(title)s.%(ext)s',
-                    'socket_timeout': 45,
-                }
-                
-                with yt_dlp.YoutubeDL(ydl_opts_no_cookies) as ydl:
-                    info = ydl.extract_info(url, download=True)
-                    file_path = ydl.prepare_filename(info)
-                    
-                    with open(file_path, 'rb') as video_file:
-                        context.bot.send_video(
-                            chat_id=update.message.chat_id,
-                            video=video_file,
-                            caption=f"🎬 {info.get('title', 'فيديو')} (جودة منخفضة)",
-                            timeout=120
-                        )
-                    
-                    os.remove(file_path)
-                    progress_msg.delete()
-                    
-            except Exception as e2:
-                error_msg = "❌ تعذر تحميل الفيديو\n\n"
-                error_msg += "• يحتاج تحديث ملف cookies\n"
-                error_msg += "• أو جرب فيديو أقل شهرة\n"
-                error_msg += "• أو منصات أخرى: TikTok, Twitter"
-                progress_msg.edit_text(error_msg)
-        else:
-            progress_msg.edit_text(f"❌ خطأ تقني: {str(e)[:100]}")
+        error_msg = f"❌ خطأ في التحميل:\n"
+        error_msg += f"• {str(e)[:150]}\n\n"
+        error_msg += "جرب:\n• رابطاً مختلفاً\n• فيديو أقصر\n• الانتظار قليلاً"
+        
+        progress_msg.edit_text(error_msg)
+        logger.error(f"DownloadError: {traceback.format_exc()}")
+        
+    except Exception as e:
+        error_msg = "⚠️ حدث خطأ غير متوقع\n"
+        error_msg += "الرجاء المحاولة لاحقاً أو تجربة رابط آخر"
+        
+        progress_msg.edit_text(error_msg)
+        logger.error(f"Unexpected error: {traceback.format_exc()}")
 
 def main():
     """الدالة الرئيسية لتشغيل البوت"""
     if not TOKEN:
         logger.error("❌ لم يتم تعيين TELEGRAM_BOT_TOKEN!")
         return
-def convert_to_direct_link(url):
-    """تحويل الرواق إلى صيغ مباشرة"""
-    if 'youtube.com/shorts/' in url:
-        video_id = url.split('/shorts/')[1].split('?')[0]
-        return f'https://www.youtube.com/watch?v={video_id}'
-    return url
     
     # التحقق من النظام
     logger.info(f"حالة Cookies: {check_cookies()}")
@@ -201,8 +202,6 @@ def convert_to_direct_link(url):
         
     except Exception as e:
         logger.error(f"❌ فشل تشغيل البوت: {traceback.format_exc()}")
-        
 
 if __name__ == '__main__':
     main()
-
